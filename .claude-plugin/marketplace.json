@@ -1,0 +1,26 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "algorithmic-research-loop",
+  "version": "1.0.0",
+  "description": "Autonomous algorithmic R&D laboratory — explores known solutions, invents new approaches, implements with TDD, benchmarks, validates complexity, and produces ranked innovation reports. Powered by 16 specialized AI agents.",
+  "owner": {
+    "name": "paulohenriquevn",
+    "email": "paulohenriquevn@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "algorithmic-research-loop",
+      "description": "Autonomous algorithmic R&D pipeline with 7-phase pipeline, 16 specialized agents, quality gates, hard blocks, and loop-back mechanism for innovation cycles. Give it a problem, walk away, come back to working implementations with benchmarks.",
+      "source": {
+        "source": "github",
+        "repo": "paulohenriquevn/algorithmic-research-loop"
+      },
+      "version": "1.0.0",
+      "author": {
+        "name": "Paulo (gmail)",
+        "email": "paulohenriquevn@gmail.com"
+      },
+      "category": "research"
+    }
+  ]
+}

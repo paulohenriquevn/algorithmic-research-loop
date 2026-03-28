@@ -1,0 +1,21 @@
+{
+  "name": "algorithmic-research-loop",
+  "version": "1.0.0",
+  "description": "Autonomous algorithmic R&D laboratory for Claude Code. Give it a computational problem, and it explores known solutions, invents new approaches through creative recombination and mutation, implements everything with TDD, benchmarks against real data, validates complexity analysis, and produces a ranked innovation report with working code.",
+  "author": {
+    "name": "Paulo (usemacaw)",
+    "email": "paulo@usemacaw.com"
+  },
+  "repository": "https://github.com/paulohenriquevn/algorithmic-research-loop",
+  "license": "MIT",
+  "keywords": [
+    "algorithms",
+    "benchmarking",
+    "complexity-analysis",
+    "invention",
+    "tdd",
+    "autonomous-agents",
+    "ralph-wiggum",
+    "autoresearch"
+  ]
+}
