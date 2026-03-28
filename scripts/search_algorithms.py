@@ -12,6 +12,8 @@ Usage:
     python3 search_algorithms.py arxiv --query "graph coloring" --category cs.DS --max-results 5
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -20,6 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from typing import Optional
 
 GITHUB_SEARCH_URL = "https://api.github.com/search/repositories"
 ARXIV_API_URL = "http://export.arxiv.org/api/query"
@@ -33,7 +36,7 @@ USER_AGENT = "AlgorithmicResearchLoop/1.0"
 # GitHub search
 # ---------------------------------------------------------------------------
 
-def search_github(query: str, language: str | None = None,
+def search_github(query: str, language: Optional[str] = None,
                   max_results: int = 20, sort: str = "stars") -> list[dict]:
     """Search GitHub repositories for algorithm implementations.
 
@@ -53,6 +56,7 @@ def search_github(query: str, language: str | None = None,
 
     url = f"{GITHUB_SEARCH_URL}?{params}"
 
+    last_error = None
     for attempt in range(MAX_RETRIES):
         try:
             req = urllib.request.Request(url, headers={
@@ -60,21 +64,24 @@ def search_github(query: str, language: str | None = None,
                 "Accept": "application/vnd.github.v3+json",
             })
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                raw = response.read(10 * 1024 * 1024)  # 10MB limit
+                data = json.loads(raw.decode("utf-8"))
             return _parse_github_response(data)
 
         except urllib.error.HTTPError as e:
+            last_error = e
             if e.code in (403, 429) and attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
                 continue
             raise
         except urllib.error.URLError as e:
+            last_error = e
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY_SECONDS)
                 continue
             raise
 
-    return []
+    raise last_error  # type: ignore[misc]
 
 
 def _parse_github_response(data: dict) -> list[dict]:
@@ -101,7 +108,7 @@ def _parse_github_response(data: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def search_arxiv(query: str, max_results: int = 20, sort_by: str = "relevance",
-                 category: str | None = None) -> list[dict]:
+                 category: Optional[str] = None) -> list[dict]:
     """Search ArXiv for algorithm papers.
 
     Uses the ArXiv public API (Atom XML). Rate limit: ~3 requests/second.
@@ -120,27 +127,31 @@ def search_arxiv(query: str, max_results: int = 20, sort_by: str = "relevance",
 
     url = f"{ARXIV_API_URL}?{params}"
 
+    last_error = None
     for attempt in range(MAX_RETRIES):
         try:
             req = urllib.request.Request(url, headers={
                 "User-Agent": USER_AGENT,
             })
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                xml_data = response.read().decode("utf-8")
+                raw = response.read(10 * 1024 * 1024)  # 10MB limit
+                xml_data = raw.decode("utf-8")
             return _parse_arxiv_response(xml_data)
 
         except urllib.error.HTTPError as e:
+            last_error = e
             if e.code == 429 and attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
                 continue
             raise
         except urllib.error.URLError as e:
+            last_error = e
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY_SECONDS)
                 continue
             raise
 
-    return []
+    raise last_error  # type: ignore[misc]
 
 
 def _parse_arxiv_response(xml_data: str) -> list[dict]:
@@ -199,7 +210,7 @@ def _parse_arxiv_response(xml_data: str) -> list[dict]:
             "authors": authors,
             "abstract": abstract,
             "published": published,
-            "year": int(published[:4]) if published else None,
+            "year": int(published[:4]) if published and published[:4].isdigit() else None,
             "categories": categories,
             "pdf_url": pdf_url,
             "web_url": arxiv_url,

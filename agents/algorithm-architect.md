@@ -223,6 +223,61 @@ python3 {{PLUGIN_ROOT}}/scripts/algo_database.py add-message \
   --metadata-json '{"protocol_file": "algorithms/__init__.py", "specs_written": X, "high_priority": Y, "medium_priority": Z, "low_priority": W}'
 ```
 
+## Multi-Language Support
+
+The current language for this research loop is **{{LANGUAGE}}**. The `AlgorithmBase` protocol adapts to the target language as follows:
+
+### Python
+Class-based with `ABC`. Use `__init__` for setup, `run()` and `validate()` as instance methods, and `@property` for `name`, `algorithm_id`, `time_complexity`, `space_complexity`. This is the default shown in the protocol above.
+
+### Rust
+Define a trait:
+```rust
+pub trait AlgorithmBase {
+    fn name(&self) -> &str;
+    fn algorithm_id(&self) -> &str;
+    fn time_complexity(&self) -> &str;
+    fn space_complexity(&self) -> &str;
+    fn run(&self, input_data: &[i64]) -> Vec<i64>;
+    fn validate(&self, input: &[i64], output: &[i64], expected: &[i64]) -> bool {
+        output == expected
+    }
+}
+```
+Write the trait to `{{OUTPUT_DIR}}/src/algorithm_base.rs`. Each algorithm implements the trait in its own module.
+
+### Go
+Define an interface:
+```go
+type AlgorithmBase interface {
+    Name() string
+    AlgorithmID() string
+    TimeComplexity() string
+    SpaceComplexity() string
+    Run(inputData []int) []int
+    Validate(input, output, expected []int) bool
+}
+```
+Write the interface to `{{OUTPUT_DIR}}/algorithms/algorithm_base.go`. Provide a `DefaultValidate` helper for the common equality check.
+
+### TypeScript
+Define an abstract class:
+```typescript
+export abstract class AlgorithmBase {
+    abstract readonly name: string;
+    abstract readonly algorithmId: string;
+    abstract readonly timeComplexity: string;
+    abstract readonly spaceComplexity: string;
+    abstract run(inputData: number[]): number[];
+    validate(input: number[], output: number[], expected: number[]): boolean {
+        return JSON.stringify(output) === JSON.stringify(expected);
+    }
+}
+```
+Write the abstract class to `{{OUTPUT_DIR}}/algorithms/algorithmBase.ts`. Each algorithm extends it in a separate file.
+
+When **{{LANGUAGE}}** is not Python, adapt the protocol file path and the spec templates accordingly. The spec documents remain in Markdown regardless of language.
+
 ## Rules
 
 - **The protocol is the CONTRACT** — it must be clear, complete, and unambiguous

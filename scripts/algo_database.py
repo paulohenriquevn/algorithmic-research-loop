@@ -20,11 +20,27 @@ Usage:
     python3 algo_database.py stats --db-path algo.db
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Valid enum values for validation at system boundaries
+# ---------------------------------------------------------------------------
+VALID_CATEGORIES = {"known", "invented"}
+VALID_ORIGINS = {"literature", "recombination", "mutation", "analogy", "inversion", "hybrid", "simplification", "novel"}
+VALID_ALGO_STATUSES = {"proposed", "implemented", "tested", "benchmarked", "validated", "discarded"}
+VALID_IMPL_STATUSES = {"draft", "tests_pass", "tests_fail", "ready"}
+VALID_ANALYSIS_TYPES = {"theoretical", "empirical"}
+VALID_COMPLEXITY_METRICS = {"time", "space"}
+VALID_STRATEGIES = {"recombination", "mutation", "analogy", "inversion", "hybrid", "simplification"}
+VALID_OUTCOMES = {"success", "partial", "failure"}
+VALID_MESSAGE_TYPES = {"finding", "instruction", "feedback", "question", "decision", "meeting_minutes"}
 
 SCHEMA_VERSION = 1
 
@@ -164,25 +180,45 @@ CREATE INDEX IF NOT EXISTS idx_messages_type ON agent_messages(message_type);
 """
 
 
-def get_connection(db_path: str) -> sqlite3.Connection:
-    """Create a database connection with WAL mode for concurrent reads."""
+import contextlib
+
+
+@contextlib.contextmanager
+def get_connection(db_path: str):
+    """Context manager for database connections with WAL mode."""
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        yield conn
+    finally:
+        conn.close()
+
+
+def _validate_enum(value, valid_set: set, field_name: str) -> None:
+    """Validate that a value is in an allowed set. Raises ValueError if not."""
+    if value is not None and value not in valid_set:
+        raise ValueError(f"Invalid {field_name}: '{value}'. Must be one of: {sorted(valid_set)}")
+
+
+def _parse_json_arg(json_str: str, arg_name: str) -> dict:
+    """Parse a JSON string argument, raising a clear error on failure."""
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON for {arg_name}: {e}") from e
 
 
 def init_db(db_path: str) -> None:
     """Initialize the database schema."""
-    conn = get_connection(db_path)
-    conn.executescript(SCHEMA_SQL)
-    conn.execute(
-        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
-        (SCHEMA_VERSION,),
-    )
-    conn.commit()
-    conn.close()
+    with get_connection(db_path) as conn:
+        conn.executescript(SCHEMA_SQL)
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+            (SCHEMA_VERSION,),
+        )
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -190,44 +226,50 @@ def init_db(db_path: str) -> None:
 # ---------------------------------------------------------------------------
 def add_algorithm(db_path: str, algo: dict) -> dict:
     """Add an algorithm to the database."""
-    conn = get_connection(db_path)
+    category = algo.get("category", "known")
+    origin = algo.get("origin")
+    status = algo.get("status", "proposed")
+    _validate_enum(category, VALID_CATEGORIES, "category")
+    _validate_enum(origin, VALID_ORIGINS, "origin")
+    _validate_enum(status, VALID_ALGO_STATUSES, "status")
+
     algo_id = algo.get("id", "")
+    with get_connection(db_path) as conn:
+        existing = conn.execute("SELECT id FROM algorithms WHERE id = ?", (algo_id,)).fetchone()
+        if existing:
+            return {"status": "duplicate", "existing_id": algo_id}
 
-    existing = conn.execute("SELECT id FROM algorithms WHERE id = ?", (algo_id,)).fetchone()
-    if existing:
-        conn.close()
-        return {"status": "duplicate", "existing_id": algo_id}
-
-    conn.execute(
-        """INSERT INTO algorithms (id, name, category, origin, parent_ids, description,
-           domain, components, pseudocode, theoretical_time, theoretical_space,
-           source_url, invention_rationale, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            algo_id,
-            algo.get("name", ""),
-            algo.get("category", "known"),
-            algo.get("origin"),
-            json.dumps(algo.get("parent_ids", [])),
-            algo.get("description", ""),
-            algo.get("domain"),
-            json.dumps(algo.get("components", {})),
-            algo.get("pseudocode"),
-            algo.get("theoretical_time"),
-            algo.get("theoretical_space"),
-            algo.get("source_url"),
-            algo.get("invention_rationale"),
-            algo.get("status", "proposed"),
-        ),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "added", "id": algo_id}
+        conn.execute(
+            """INSERT INTO algorithms (id, name, category, origin, parent_ids, description,
+               domain, components, pseudocode, theoretical_time, theoretical_space,
+               source_url, invention_rationale, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                algo_id,
+                algo.get("name", ""),
+                category,
+                origin,
+                json.dumps(algo.get("parent_ids", [])),
+                algo.get("description", ""),
+                algo.get("domain"),
+                json.dumps(algo.get("components", {})),
+                algo.get("pseudocode"),
+                algo.get("theoretical_time"),
+                algo.get("theoretical_space"),
+                algo.get("source_url"),
+                algo.get("invention_rationale"),
+                status,
+            ),
+        )
+        conn.commit()
+        return {"status": "added", "id": algo_id}
 
 
 def update_algorithm(db_path: str, algo_id: str, updates: dict) -> dict:
     """Update specific fields of an algorithm."""
-    conn = get_connection(db_path)
+    if "status" in updates:
+        _validate_enum(updates["status"], VALID_ALGO_STATUSES, "status")
+
     allowed_fields = {
         "status", "discard_reason", "theoretical_time", "theoretical_space",
         "pseudocode", "components", "invention_rationale", "description",
@@ -243,40 +285,38 @@ def update_algorithm(db_path: str, algo_id: str, updates: dict) -> dict:
                 values.append(value)
 
     if not set_clauses:
-        conn.close()
         return {"status": "error", "message": "no valid fields to update"}
 
     values.append(algo_id)
-    conn.execute(
-        f"UPDATE algorithms SET {', '.join(set_clauses)} WHERE id = ?", values
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "updated", "id": algo_id}
+    with get_connection(db_path) as conn:
+        conn.execute(
+            f"UPDATE algorithms SET {', '.join(set_clauses)} WHERE id = ?", values
+        )
+        conn.commit()
+        return {"status": "updated", "id": algo_id}
 
 
-def query_algorithms(db_path: str, category: str | None = None,
-                     status: str | None = None,
-                     domain: str | None = None) -> list[dict]:
+def query_algorithms(db_path: str, category: Optional[str] = None,
+                     status: Optional[str] = None,
+                     domain: Optional[str] = None) -> list[dict]:
     """Query algorithms with optional filters."""
-    conn = get_connection(db_path)
-    query = "SELECT * FROM algorithms WHERE 1=1"
-    params: list = []
+    with get_connection(db_path) as conn:
+        query = "SELECT * FROM algorithms WHERE 1=1"
+        params: list = []
 
-    if category:
-        query += " AND category = ?"
-        params.append(category)
-    if status:
-        query += " AND status = ?"
-        params.append(status)
-    if domain:
-        query += " AND domain = ?"
-        params.append(domain)
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if domain:
+            query += " AND domain = ?"
+            params.append(domain)
 
-    query += " ORDER BY category, name"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [_row_to_algo(row) for row in rows]
+        query += " ORDER BY category, name"
+        rows = conn.execute(query, params).fetchall()
+        return [_row_to_algo(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -284,34 +324,38 @@ def query_algorithms(db_path: str, category: str | None = None,
 # ---------------------------------------------------------------------------
 def add_implementation(db_path: str, algo_id: str, impl: dict) -> dict:
     """Add an implementation for an algorithm."""
-    conn = get_connection(db_path)
-    conn.execute(
-        """INSERT INTO implementations
-           (algorithm_id, version, language, file_path, test_file_path,
-            tests_passed, tests_total, lines_of_code, status, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            algo_id,
-            impl.get("version", 1),
-            impl.get("language", "python"),
-            impl.get("file_path", ""),
-            impl.get("test_file_path"),
-            impl.get("tests_passed", 0),
-            impl.get("tests_total", 0),
-            impl.get("lines_of_code"),
-            impl.get("status", "draft"),
-            impl.get("notes"),
-        ),
-    )
-    conn.commit()
-    impl_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.close()
-    return {"status": "added", "id": impl_id, "algorithm_id": algo_id}
+    status = impl.get("status", "draft")
+    _validate_enum(status, VALID_IMPL_STATUSES, "status")
+
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """INSERT INTO implementations
+               (algorithm_id, version, language, file_path, test_file_path,
+                tests_passed, tests_total, lines_of_code, status, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                algo_id,
+                impl.get("version", 1),
+                impl.get("language", "python"),
+                impl.get("file_path", ""),
+                impl.get("test_file_path"),
+                impl.get("tests_passed", 0),
+                impl.get("tests_total", 0),
+                impl.get("lines_of_code"),
+                status,
+                impl.get("notes"),
+            ),
+        )
+        conn.commit()
+        impl_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return {"status": "added", "id": impl_id, "algorithm_id": algo_id}
 
 
 def update_implementation(db_path: str, impl_id: int, updates: dict) -> dict:
     """Update implementation fields."""
-    conn = get_connection(db_path)
+    if "status" in updates:
+        _validate_enum(updates["status"], VALID_IMPL_STATUSES, "status")
+
     allowed_fields = {
         "status", "tests_passed", "tests_total", "lines_of_code", "notes",
         "file_path", "test_file_path",
@@ -324,34 +368,32 @@ def update_implementation(db_path: str, impl_id: int, updates: dict) -> dict:
             values.append(value)
 
     if not set_clauses:
-        conn.close()
         return {"status": "error", "message": "no valid fields to update"}
 
     values.append(impl_id)
-    conn.execute(
-        f"UPDATE implementations SET {', '.join(set_clauses)} WHERE id = ?", values
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "updated", "id": impl_id}
+    with get_connection(db_path) as conn:
+        conn.execute(
+            f"UPDATE implementations SET {', '.join(set_clauses)} WHERE id = ?", values
+        )
+        conn.commit()
+        return {"status": "updated", "id": impl_id}
 
 
-def query_implementations(db_path: str, algo_id: str | None = None,
-                          status: str | None = None) -> list[dict]:
+def query_implementations(db_path: str, algo_id: Optional[str] = None,
+                          status: Optional[str] = None) -> list[dict]:
     """Query implementations with optional filters."""
-    conn = get_connection(db_path)
-    query = "SELECT i.*, a.name as algorithm_name FROM implementations i JOIN algorithms a ON i.algorithm_id = a.id WHERE 1=1"
-    params: list = []
-    if algo_id:
-        query += " AND i.algorithm_id = ?"
-        params.append(algo_id)
-    if status:
-        query += " AND i.status = ?"
-        params.append(status)
-    query += " ORDER BY i.algorithm_id, i.version"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    with get_connection(db_path) as conn:
+        query = "SELECT i.*, a.name as algorithm_name FROM implementations i JOIN algorithms a ON i.algorithm_id = a.id WHERE 1=1"
+        params: list = []
+        if algo_id:
+            query += " AND i.algorithm_id = ?"
+            params.append(algo_id)
+        if status:
+            query += " AND i.status = ?"
+            params.append(status)
+        query += " ORDER BY i.algorithm_id, i.version"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -359,110 +401,106 @@ def query_implementations(db_path: str, algo_id: str | None = None,
 # ---------------------------------------------------------------------------
 def add_benchmark(db_path: str, benchmark: dict) -> dict:
     """Add a benchmark definition."""
-    conn = get_connection(db_path)
     bench_id = benchmark.get("id", "")
+    with get_connection(db_path) as conn:
+        existing = conn.execute("SELECT id FROM benchmarks WHERE id = ?", (bench_id,)).fetchone()
+        if existing:
+            return {"status": "duplicate", "existing_id": bench_id}
 
-    existing = conn.execute("SELECT id FROM benchmarks WHERE id = ?", (bench_id,)).fetchone()
-    if existing:
-        conn.close()
-        return {"status": "duplicate", "existing_id": bench_id}
-
-    conn.execute(
-        """INSERT INTO benchmarks (id, name, description, input_generator,
-           input_sizes, metrics, warmup_runs, measured_runs)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            bench_id,
-            benchmark.get("name", ""),
-            benchmark.get("description", ""),
-            benchmark.get("input_generator"),
-            json.dumps(benchmark.get("input_sizes", [])),
-            json.dumps(benchmark.get("metrics", [])),
-            benchmark.get("warmup_runs", 3),
-            benchmark.get("measured_runs", 10),
-        ),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "added", "id": bench_id}
+        conn.execute(
+            """INSERT INTO benchmarks (id, name, description, input_generator,
+               input_sizes, metrics, warmup_runs, measured_runs)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                bench_id,
+                benchmark.get("name", ""),
+                benchmark.get("description", ""),
+                benchmark.get("input_generator"),
+                json.dumps(benchmark.get("input_sizes", [])),
+                json.dumps(benchmark.get("metrics", [])),
+                benchmark.get("warmup_runs", 3),
+                benchmark.get("measured_runs", 10),
+            ),
+        )
+        conn.commit()
+        return {"status": "added", "id": bench_id}
 
 
 def add_benchmark_result(db_path: str, result: dict) -> dict:
     """Add a benchmark result entry."""
-    conn = get_connection(db_path)
-    conn.execute(
-        """INSERT INTO benchmark_results
-           (benchmark_id, algorithm_id, implementation_id, input_size,
-            metric, value, std_dev, min_value, max_value, runs, environment)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            result.get("benchmark_id", ""),
-            result.get("algorithm_id", ""),
-            result.get("implementation_id"),
-            result.get("input_size", 0),
-            result.get("metric", ""),
-            result.get("value", 0),
-            result.get("std_dev"),
-            result.get("min_value"),
-            result.get("max_value"),
-            result.get("runs"),
-            json.dumps(result.get("environment", {})),
-        ),
-    )
-    conn.commit()
-    rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.close()
-    return {"status": "added", "id": rid}
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """INSERT INTO benchmark_results
+               (benchmark_id, algorithm_id, implementation_id, input_size,
+                metric, value, std_dev, min_value, max_value, runs, environment)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                result.get("benchmark_id", ""),
+                result.get("algorithm_id", ""),
+                result.get("implementation_id"),
+                result.get("input_size", 0),
+                result.get("metric", ""),
+                result.get("value", 0),
+                result.get("std_dev"),
+                result.get("min_value"),
+                result.get("max_value"),
+                result.get("runs"),
+                json.dumps(result.get("environment", {})),
+            ),
+        )
+        conn.commit()
+        rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return {"status": "added", "id": rid}
 
 
-def query_benchmark_results(db_path: str, algo_id: str | None = None,
-                            benchmark_id: str | None = None,
-                            metric: str | None = None) -> list[dict]:
+def query_benchmark_results(db_path: str, algo_id: Optional[str] = None,
+                            benchmark_id: Optional[str] = None,
+                            metric: Optional[str] = None) -> list[dict]:
     """Query benchmark results with optional filters."""
-    conn = get_connection(db_path)
-    query = """SELECT br.*, a.name as algorithm_name, b.name as benchmark_name
-               FROM benchmark_results br
-               JOIN algorithms a ON br.algorithm_id = a.id
-               JOIN benchmarks b ON br.benchmark_id = b.id
-               WHERE 1=1"""
-    params: list = []
-    if algo_id:
-        query += " AND br.algorithm_id = ?"
-        params.append(algo_id)
-    if benchmark_id:
-        query += " AND br.benchmark_id = ?"
-        params.append(benchmark_id)
-    if metric:
-        query += " AND br.metric = ?"
-        params.append(metric)
-    query += " ORDER BY br.metric, br.input_size, br.value"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    with get_connection(db_path) as conn:
+        query = """SELECT br.*, a.name as algorithm_name, b.name as benchmark_name
+                   FROM benchmark_results br
+                   JOIN algorithms a ON br.algorithm_id = a.id
+                   JOIN benchmarks b ON br.benchmark_id = b.id
+                   WHERE 1=1"""
+        params: list = []
+        if algo_id:
+            query += " AND br.algorithm_id = ?"
+            params.append(algo_id)
+        if benchmark_id:
+            query += " AND br.benchmark_id = ?"
+            params.append(benchmark_id)
+        if metric:
+            query += " AND br.metric = ?"
+            params.append(metric)
+        query += " ORDER BY br.metric, br.input_size, br.value"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
 
-def results_matrix(db_path: str, benchmark_id: str | None = None,
-                   metric: str | None = None) -> dict:
+def results_matrix(db_path: str, benchmark_id: Optional[str] = None,
+                   metric: Optional[str] = None) -> dict:
     """Build a cross-algorithm results matrix for comparison."""
-    conn = get_connection(db_path)
-    query = """SELECT br.*, a.name as algorithm_name, a.category
-               FROM benchmark_results br
-               JOIN algorithms a ON br.algorithm_id = a.id
-               WHERE 1=1"""
-    params: list = []
-    if benchmark_id:
-        query += " AND br.benchmark_id = ?"
-        params.append(benchmark_id)
-    if metric:
-        query += " AND br.metric = ?"
-        params.append(metric)
-    query += " ORDER BY br.metric, br.input_size, br.value"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
+    with get_connection(db_path) as conn:
+        query = """SELECT br.*, a.name as algorithm_name, a.category
+                   FROM benchmark_results br
+                   JOIN algorithms a ON br.algorithm_id = a.id
+                   WHERE 1=1"""
+        params: list = []
+        if benchmark_id:
+            query += " AND br.benchmark_id = ?"
+            params.append(benchmark_id)
+        if metric:
+            query += " AND br.metric = ?"
+            params.append(metric)
+        query += " ORDER BY br.metric, br.input_size, br.value"
+        rows = conn.execute(query, params).fetchall()
 
     matrix: dict[str, list[dict]] = {}
+    metrics_seen: set[str] = set()
     for row in rows:
         d = dict(row)
+        metrics_seen.add(d["metric"])
         key = f"{d['metric']}@{d['input_size']}"
         if key not in matrix:
             matrix[key] = []
@@ -470,7 +508,7 @@ def results_matrix(db_path: str, benchmark_id: str | None = None,
 
     return {
         "status": "ok",
-        "metrics": list({r["metric"] for r in [dict(row) for row in rows]} if rows else set()),
+        "metrics": sorted(metrics_seen),
         "total_entries": sum(len(v) for v in matrix.values()),
         "matrix": matrix,
     }
@@ -481,49 +519,56 @@ def results_matrix(db_path: str, benchmark_id: str | None = None,
 # ---------------------------------------------------------------------------
 def add_complexity(db_path: str, analysis: dict) -> dict:
     """Add a complexity analysis entry."""
-    conn = get_connection(db_path)
-    conn.execute(
-        """INSERT INTO complexity_analysis
-           (algorithm_id, analysis_type, metric, complexity_class,
-            empirical_fit, r_squared, data_points, discrepancy, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            analysis.get("algorithm_id", ""),
-            analysis.get("analysis_type", "theoretical"),
-            analysis.get("metric", "time"),
-            analysis.get("complexity_class", ""),
-            analysis.get("empirical_fit"),
-            analysis.get("r_squared"),
-            json.dumps(analysis.get("data_points", [])),
-            analysis.get("discrepancy"),
-            analysis.get("notes"),
-        ),
-    )
-    conn.commit()
-    cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.close()
-    return {"status": "added", "id": cid}
+    analysis_type = analysis.get("analysis_type", "theoretical")
+    metric = analysis.get("metric", "time")
+    _validate_enum(analysis_type, VALID_ANALYSIS_TYPES, "analysis_type")
+    _validate_enum(metric, VALID_COMPLEXITY_METRICS, "metric")
+
+    r_squared = analysis.get("r_squared")
+    if r_squared is not None and not (0.0 <= r_squared <= 1.0):
+        raise ValueError(f"r_squared must be between 0.0 and 1.0, got {r_squared}")
+
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """INSERT INTO complexity_analysis
+               (algorithm_id, analysis_type, metric, complexity_class,
+                empirical_fit, r_squared, data_points, discrepancy, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                analysis.get("algorithm_id", ""),
+                analysis_type,
+                metric,
+                analysis.get("complexity_class", ""),
+                analysis.get("empirical_fit"),
+                r_squared,
+                json.dumps(analysis.get("data_points", [])),
+                analysis.get("discrepancy"),
+                analysis.get("notes"),
+            ),
+        )
+        conn.commit()
+        cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return {"status": "added", "id": cid}
 
 
-def query_complexity(db_path: str, algo_id: str | None = None,
-                     analysis_type: str | None = None) -> list[dict]:
+def query_complexity(db_path: str, algo_id: Optional[str] = None,
+                     analysis_type: Optional[str] = None) -> list[dict]:
     """Query complexity analysis entries."""
-    conn = get_connection(db_path)
-    query = """SELECT ca.*, a.name as algorithm_name
-               FROM complexity_analysis ca
-               JOIN algorithms a ON ca.algorithm_id = a.id
-               WHERE 1=1"""
-    params: list = []
-    if algo_id:
-        query += " AND ca.algorithm_id = ?"
-        params.append(algo_id)
-    if analysis_type:
-        query += " AND ca.analysis_type = ?"
-        params.append(analysis_type)
-    query += " ORDER BY ca.algorithm_id, ca.analysis_type, ca.metric"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    with get_connection(db_path) as conn:
+        query = """SELECT ca.*, a.name as algorithm_name
+                   FROM complexity_analysis ca
+                   JOIN algorithms a ON ca.algorithm_id = a.id
+                   WHERE 1=1"""
+        params: list = []
+        if algo_id:
+            query += " AND ca.algorithm_id = ?"
+            params.append(algo_id)
+        if analysis_type:
+            query += " AND ca.analysis_type = ?"
+            params.append(analysis_type)
+        query += " ORDER BY ca.algorithm_id, ca.analysis_type, ca.metric"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -531,32 +576,39 @@ def query_complexity(db_path: str, algo_id: str | None = None,
 # ---------------------------------------------------------------------------
 def add_invention(db_path: str, entry: dict) -> dict:
     """Add an invention log entry."""
-    conn = get_connection(db_path)
-    conn.execute(
-        """INSERT INTO invention_log
-           (cycle, algorithm_id, strategy, hypothesis, outcome,
-            result_summary, insight, feeds_next)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            entry.get("cycle", 1),
-            entry.get("algorithm_id"),
-            entry.get("strategy", ""),
-            entry.get("hypothesis", ""),
-            entry.get("outcome"),
-            entry.get("result_summary"),
-            entry.get("insight"),
-            json.dumps(entry.get("feeds_next", [])),
-        ),
-    )
-    conn.commit()
-    iid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.close()
-    return {"status": "added", "id": iid}
+    strategy = entry.get("strategy", "")
+    outcome = entry.get("outcome")
+    if strategy:
+        _validate_enum(strategy, VALID_STRATEGIES, "strategy")
+    _validate_enum(outcome, VALID_OUTCOMES, "outcome")
+
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """INSERT INTO invention_log
+               (cycle, algorithm_id, strategy, hypothesis, outcome,
+                result_summary, insight, feeds_next)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                entry.get("cycle", 1),
+                entry.get("algorithm_id"),
+                strategy,
+                entry.get("hypothesis", ""),
+                outcome,
+                entry.get("result_summary"),
+                entry.get("insight"),
+                json.dumps(entry.get("feeds_next", [])),
+            ),
+        )
+        conn.commit()
+        iid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return {"status": "added", "id": iid}
 
 
 def update_invention(db_path: str, inv_id: int, updates: dict) -> dict:
     """Update invention log entry (typically outcome/insight after testing)."""
-    conn = get_connection(db_path)
+    if "outcome" in updates:
+        _validate_enum(updates["outcome"], VALID_OUTCOMES, "outcome")
+
     allowed_fields = {"outcome", "result_summary", "insight", "feeds_next"}
     set_clauses = []
     values = []
@@ -569,38 +621,36 @@ def update_invention(db_path: str, inv_id: int, updates: dict) -> dict:
                 values.append(value)
 
     if not set_clauses:
-        conn.close()
         return {"status": "error", "message": "no valid fields to update"}
 
     values.append(inv_id)
-    conn.execute(
-        f"UPDATE invention_log SET {', '.join(set_clauses)} WHERE id = ?", values
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "updated", "id": inv_id}
+    with get_connection(db_path) as conn:
+        conn.execute(
+            f"UPDATE invention_log SET {', '.join(set_clauses)} WHERE id = ?", values
+        )
+        conn.commit()
+        return {"status": "updated", "id": inv_id}
 
 
-def query_inventions(db_path: str, cycle: int | None = None,
-                     outcome: str | None = None,
-                     strategy: str | None = None) -> list[dict]:
+def query_inventions(db_path: str, cycle: Optional[int] = None,
+                     outcome: Optional[str] = None,
+                     strategy: Optional[str] = None) -> list[dict]:
     """Query invention log entries."""
-    conn = get_connection(db_path)
-    query = "SELECT * FROM invention_log WHERE 1=1"
-    params: list = []
-    if cycle is not None:
-        query += " AND cycle = ?"
-        params.append(cycle)
-    if outcome:
-        query += " AND outcome = ?"
-        params.append(outcome)
-    if strategy:
-        query += " AND strategy = ?"
-        params.append(strategy)
-    query += " ORDER BY cycle, created_at"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    with get_connection(db_path) as conn:
+        query = "SELECT * FROM invention_log WHERE 1=1"
+        params: list = []
+        if cycle is not None:
+            query += " AND cycle = ?"
+            params.append(cycle)
+        if outcome:
+            query += " AND outcome = ?"
+            params.append(outcome)
+        if strategy:
+            query += " AND strategy = ?"
+            params.append(strategy)
+        query += " ORDER BY cycle, created_at"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -608,35 +658,40 @@ def query_inventions(db_path: str, cycle: int | None = None,
 # ---------------------------------------------------------------------------
 def add_quality_score(db_path: str, phase: int, phase_name: str,
                       iteration: int, score: float, threshold: float,
-                      dimensions: dict | None = None,
+                      dimensions: Optional[dict] = None,
                       feedback: str = "") -> dict:
     """Record a quality evaluation score for a phase."""
+    if not (0.0 <= score <= 1.0):
+        raise ValueError(f"score must be between 0.0 and 1.0, got {score}")
+    if not (0.0 <= threshold <= 1.0):
+        raise ValueError(f"threshold must be between 0.0 and 1.0, got {threshold}")
+    if not (1 <= phase <= 7):
+        raise ValueError(f"phase must be between 1 and 7, got {phase}")
+
     passed = 1 if score >= threshold else 0
-    conn = get_connection(db_path)
-    conn.execute(
-        """INSERT INTO quality_scores
-           (phase, phase_name, iteration, score, passed, threshold, dimensions, feedback)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (phase, phase_name, iteration, score, passed, threshold,
-         json.dumps(dimensions or {}), feedback),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "recorded", "passed": bool(passed), "score": score}
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """INSERT INTO quality_scores
+               (phase, phase_name, iteration, score, passed, threshold, dimensions, feedback)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (phase, phase_name, iteration, score, passed, threshold,
+             json.dumps(dimensions or {}), feedback),
+        )
+        conn.commit()
+        return {"status": "recorded", "passed": bool(passed), "score": score}
 
 
-def get_quality_history(db_path: str, phase: int | None = None) -> list[dict]:
+def get_quality_history(db_path: str, phase: Optional[int] = None) -> list[dict]:
     """Get quality score history."""
-    conn = get_connection(db_path)
-    query = "SELECT * FROM quality_scores"
-    params: list = []
-    if phase is not None:
-        query += " WHERE phase = ?"
-        params.append(phase)
-    query += " ORDER BY created_at ASC"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    with get_connection(db_path) as conn:
+        query = "SELECT * FROM quality_scores"
+        params: list = []
+        if phase is not None:
+            query += " WHERE phase = ?"
+            params.append(phase)
+        query += " ORDER BY created_at ASC"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -644,43 +699,43 @@ def get_quality_history(db_path: str, phase: int | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 def add_agent_message(db_path: str, from_agent: str, phase: int,
                       iteration: int, message_type: str, content: str,
-                      to_agent: str | None = None,
-                      metadata: dict | None = None) -> dict:
+                      to_agent: Optional[str] = None,
+                      metadata: Optional[dict] = None) -> dict:
     """Record an inter-agent message."""
-    conn = get_connection(db_path)
-    conn.execute(
-        """INSERT INTO agent_messages
-           (from_agent, to_agent, phase, iteration, message_type, content, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (from_agent, to_agent, phase, iteration, message_type, content,
-         json.dumps(metadata or {})),
-    )
-    conn.commit()
-    msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.close()
-    return {"status": "sent", "message_id": msg_id}
+    _validate_enum(message_type, VALID_MESSAGE_TYPES, "message_type")
+
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """INSERT INTO agent_messages
+               (from_agent, to_agent, phase, iteration, message_type, content, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (from_agent, to_agent, phase, iteration, message_type, content,
+             json.dumps(metadata or {})),
+        )
+        conn.commit()
+        msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return {"status": "sent", "message_id": msg_id}
 
 
-def query_messages(db_path: str, phase: int | None = None,
-                   to_agent: str | None = None,
-                   message_type: str | None = None) -> list[dict]:
+def query_messages(db_path: str, phase: Optional[int] = None,
+                   to_agent: Optional[str] = None,
+                   message_type: Optional[str] = None) -> list[dict]:
     """Query agent messages."""
-    conn = get_connection(db_path)
-    query = "SELECT * FROM agent_messages WHERE 1=1"
-    params: list = []
-    if phase is not None:
-        query += " AND phase = ?"
-        params.append(phase)
-    if to_agent:
-        query += " AND (to_agent = ? OR to_agent IS NULL)"
-        params.append(to_agent)
-    if message_type:
-        query += " AND message_type = ?"
-        params.append(message_type)
-    query += " ORDER BY created_at ASC"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    with get_connection(db_path) as conn:
+        query = "SELECT * FROM agent_messages WHERE 1=1"
+        params: list = []
+        if phase is not None:
+            query += " AND phase = ?"
+            params.append(phase)
+        if to_agent:
+            query += " AND (to_agent = ? OR to_agent IS NULL)"
+            params.append(to_agent)
+        if message_type:
+            query += " AND message_type = ?"
+            params.append(message_type)
+        query += " ORDER BY created_at ASC"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -688,48 +743,47 @@ def query_messages(db_path: str, phase: int | None = None,
 # ---------------------------------------------------------------------------
 def get_stats(db_path: str) -> dict:
     """Get database statistics."""
-    conn = get_connection(db_path)
-    stats = {}
+    with get_connection(db_path) as conn:
+        stats = {}
 
-    stats["total_algorithms"] = conn.execute("SELECT COUNT(*) FROM algorithms").fetchone()[0]
-    stats["algorithms_by_category"] = {}
-    for row in conn.execute("SELECT category, COUNT(*) as cnt FROM algorithms GROUP BY category"):
-        stats["algorithms_by_category"][row["category"]] = row["cnt"]
-    stats["algorithms_by_status"] = {}
-    for row in conn.execute("SELECT status, COUNT(*) as cnt FROM algorithms GROUP BY status"):
-        stats["algorithms_by_status"][row["status"]] = row["cnt"]
+        stats["total_algorithms"] = conn.execute("SELECT COUNT(*) FROM algorithms").fetchone()[0]
+        stats["algorithms_by_category"] = {}
+        for row in conn.execute("SELECT category, COUNT(*) as cnt FROM algorithms GROUP BY category"):
+            stats["algorithms_by_category"][row["category"]] = row["cnt"]
+        stats["algorithms_by_status"] = {}
+        for row in conn.execute("SELECT status, COUNT(*) as cnt FROM algorithms GROUP BY status"):
+            stats["algorithms_by_status"][row["status"]] = row["cnt"]
 
-    stats["total_implementations"] = conn.execute("SELECT COUNT(*) FROM implementations").fetchone()[0]
-    stats["implementations_by_status"] = {}
-    for row in conn.execute("SELECT status, COUNT(*) as cnt FROM implementations GROUP BY status"):
-        stats["implementations_by_status"][row["status"]] = row["cnt"]
+        stats["total_implementations"] = conn.execute("SELECT COUNT(*) FROM implementations").fetchone()[0]
+        stats["implementations_by_status"] = {}
+        for row in conn.execute("SELECT status, COUNT(*) as cnt FROM implementations GROUP BY status"):
+            stats["implementations_by_status"][row["status"]] = row["cnt"]
 
-    stats["total_benchmarks"] = conn.execute("SELECT COUNT(*) FROM benchmarks").fetchone()[0]
-    stats["total_benchmark_results"] = conn.execute("SELECT COUNT(*) FROM benchmark_results").fetchone()[0]
-    stats["total_complexity_analyses"] = conn.execute("SELECT COUNT(*) FROM complexity_analysis").fetchone()[0]
+        stats["total_benchmarks"] = conn.execute("SELECT COUNT(*) FROM benchmarks").fetchone()[0]
+        stats["total_benchmark_results"] = conn.execute("SELECT COUNT(*) FROM benchmark_results").fetchone()[0]
+        stats["total_complexity_analyses"] = conn.execute("SELECT COUNT(*) FROM complexity_analysis").fetchone()[0]
 
-    stats["total_inventions"] = conn.execute("SELECT COUNT(*) FROM invention_log").fetchone()[0]
-    stats["inventions_by_outcome"] = {}
-    for row in conn.execute("SELECT outcome, COUNT(*) as cnt FROM invention_log WHERE outcome IS NOT NULL GROUP BY outcome"):
-        stats["inventions_by_outcome"][row["outcome"]] = row["cnt"]
+        stats["total_inventions"] = conn.execute("SELECT COUNT(*) FROM invention_log").fetchone()[0]
+        stats["inventions_by_outcome"] = {}
+        for row in conn.execute("SELECT outcome, COUNT(*) as cnt FROM invention_log WHERE outcome IS NOT NULL GROUP BY outcome"):
+            stats["inventions_by_outcome"][row["outcome"]] = row["cnt"]
 
-    stats["total_quality_scores"] = conn.execute("SELECT COUNT(*) FROM quality_scores").fetchone()[0]
-    stats["quality_summary"] = {}
-    for row in conn.execute(
-        "SELECT phase, phase_name, AVG(score) as avg_score, COUNT(*) as attempts, "
-        "SUM(passed) as passes FROM quality_scores GROUP BY phase"
-    ):
-        stats["quality_summary"][row["phase"]] = {
-            "phase_name": row["phase_name"],
-            "avg_score": round(row["avg_score"], 3),
-            "attempts": row["attempts"],
-            "passes": row["passes"],
-        }
+        stats["total_quality_scores"] = conn.execute("SELECT COUNT(*) FROM quality_scores").fetchone()[0]
+        stats["quality_summary"] = {}
+        for row in conn.execute(
+            "SELECT phase, phase_name, AVG(score) as avg_score, COUNT(*) as attempts, "
+            "SUM(passed) as passes FROM quality_scores GROUP BY phase"
+        ):
+            stats["quality_summary"][row["phase"]] = {
+                "phase_name": row["phase_name"],
+                "avg_score": round(row["avg_score"], 3),
+                "attempts": row["attempts"],
+                "passes": row["passes"],
+            }
 
-    stats["total_agent_messages"] = conn.execute("SELECT COUNT(*) FROM agent_messages").fetchone()[0]
+        stats["total_agent_messages"] = conn.execute("SELECT COUNT(*) FROM agent_messages").fetchone()[0]
 
-    conn.close()
-    return stats
+        return stats
 
 
 # ---------------------------------------------------------------------------
@@ -885,99 +939,110 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "init":
-        init_db(args.db_path)
-        json.dump({"status": "initialized", "path": args.db_path}, sys.stdout, indent=2)
+    try:
+        if args.command == "init":
+            init_db(args.db_path)
+            json.dump({"status": "initialized", "path": args.db_path}, sys.stdout, indent=2)
 
-    elif args.command == "add-algorithm":
-        result = add_algorithm(args.db_path, json.loads(args.algo_json))
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "add-algorithm":
+            result = add_algorithm(args.db_path, _parse_json_arg(args.algo_json, "--algo-json"))
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "update-algorithm":
-        result = update_algorithm(args.db_path, args.algo_id, json.loads(args.updates_json))
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "update-algorithm":
+            result = update_algorithm(args.db_path, args.algo_id, _parse_json_arg(args.updates_json, "--updates-json"))
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "query-algorithms":
-        results = query_algorithms(args.db_path, args.category, args.status, args.domain)
-        json.dump(results, sys.stdout, indent=2)
+        elif args.command == "query-algorithms":
+            results = query_algorithms(args.db_path, args.category, args.status, args.domain)
+            json.dump(results, sys.stdout, indent=2)
 
-    elif args.command == "add-implementation":
-        result = add_implementation(args.db_path, args.algo_id, json.loads(args.impl_json))
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "add-implementation":
+            result = add_implementation(args.db_path, args.algo_id, _parse_json_arg(args.impl_json, "--impl-json"))
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "update-implementation":
-        result = update_implementation(args.db_path, args.impl_id, json.loads(args.updates_json))
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "update-implementation":
+            result = update_implementation(args.db_path, args.impl_id, _parse_json_arg(args.updates_json, "--updates-json"))
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "query-implementations":
-        results = query_implementations(args.db_path, args.algo_id, args.status)
-        json.dump(results, sys.stdout, indent=2)
+        elif args.command == "query-implementations":
+            results = query_implementations(args.db_path, args.algo_id, args.status)
+            json.dump(results, sys.stdout, indent=2)
 
-    elif args.command == "add-benchmark":
-        result = add_benchmark(args.db_path, json.loads(args.benchmark_json))
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "add-benchmark":
+            result = add_benchmark(args.db_path, _parse_json_arg(args.benchmark_json, "--benchmark-json"))
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "add-benchmark-result":
-        result = add_benchmark_result(args.db_path, json.loads(args.result_json))
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "add-benchmark-result":
+            result = add_benchmark_result(args.db_path, _parse_json_arg(args.result_json, "--result-json"))
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "query-results":
-        results = query_benchmark_results(args.db_path, args.algo_id, args.benchmark_id, args.metric)
-        json.dump(results, sys.stdout, indent=2)
+        elif args.command == "query-results":
+            results = query_benchmark_results(args.db_path, args.algo_id, args.benchmark_id, args.metric)
+            json.dump(results, sys.stdout, indent=2)
 
-    elif args.command == "results-matrix":
-        matrix = results_matrix(args.db_path, args.benchmark_id, args.metric)
-        json.dump(matrix, sys.stdout, indent=2)
+        elif args.command == "results-matrix":
+            matrix = results_matrix(args.db_path, args.benchmark_id, args.metric)
+            json.dump(matrix, sys.stdout, indent=2)
 
-    elif args.command == "add-complexity":
-        result = add_complexity(args.db_path, json.loads(args.complexity_json))
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "add-complexity":
+            result = add_complexity(args.db_path, _parse_json_arg(args.complexity_json, "--complexity-json"))
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "query-complexity":
-        results = query_complexity(args.db_path, args.algo_id, args.analysis_type)
-        json.dump(results, sys.stdout, indent=2)
+        elif args.command == "query-complexity":
+            results = query_complexity(args.db_path, args.algo_id, args.analysis_type)
+            json.dump(results, sys.stdout, indent=2)
 
-    elif args.command == "add-invention":
-        result = add_invention(args.db_path, json.loads(args.invention_json))
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "add-invention":
+            result = add_invention(args.db_path, _parse_json_arg(args.invention_json, "--invention-json"))
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "update-invention":
-        result = update_invention(args.db_path, args.inv_id, json.loads(args.updates_json))
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "update-invention":
+            result = update_invention(args.db_path, args.inv_id, _parse_json_arg(args.updates_json, "--updates-json"))
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "query-inventions":
-        results = query_inventions(args.db_path, args.cycle, args.outcome, args.strategy)
-        json.dump(results, sys.stdout, indent=2)
+        elif args.command == "query-inventions":
+            results = query_inventions(args.db_path, args.cycle, args.outcome, args.strategy)
+            json.dump(results, sys.stdout, indent=2)
 
-    elif args.command == "add-quality-score":
-        result = add_quality_score(
-            args.db_path, args.phase, args.phase_name, args.iteration,
-            args.score, args.threshold,
-            json.loads(args.dimensions_json), args.feedback,
-        )
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "add-quality-score":
+            result = add_quality_score(
+                args.db_path, args.phase, args.phase_name, args.iteration,
+                args.score, args.threshold,
+                _parse_json_arg(args.dimensions_json, "--dimensions-json"), args.feedback,
+            )
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "quality-history":
-        history = get_quality_history(args.db_path, args.phase)
-        json.dump(history, sys.stdout, indent=2)
+        elif args.command == "quality-history":
+            history = get_quality_history(args.db_path, args.phase)
+            json.dump(history, sys.stdout, indent=2)
 
-    elif args.command == "add-message":
-        result = add_agent_message(
-            args.db_path, args.from_agent, args.phase, args.iteration,
-            args.message_type, args.content, args.to_agent,
-            json.loads(args.metadata_json),
-        )
-        json.dump(result, sys.stdout, indent=2)
+        elif args.command == "add-message":
+            result = add_agent_message(
+                args.db_path, args.from_agent, args.phase, args.iteration,
+                args.message_type, args.content, args.to_agent,
+                _parse_json_arg(args.metadata_json, "--metadata-json"),
+            )
+            json.dump(result, sys.stdout, indent=2)
 
-    elif args.command == "query-messages":
-        messages = query_messages(args.db_path, args.phase, args.to_agent, args.message_type)
-        json.dump(messages, sys.stdout, indent=2)
+        elif args.command == "query-messages":
+            messages = query_messages(args.db_path, args.phase, args.to_agent, args.message_type)
+            json.dump(messages, sys.stdout, indent=2)
 
-    elif args.command == "stats":
-        stats = get_stats(args.db_path)
-        json.dump(stats, sys.stdout, indent=2)
+        elif args.command == "stats":
+            stats = get_stats(args.db_path)
+            json.dump(stats, sys.stdout, indent=2)
 
-    print()
+        print()
+
+    except (ValueError, json.JSONDecodeError) as e:
+        json.dump({"status": "error", "message": str(e)}, sys.stdout, indent=2)
+        print()
+        sys.exit(1)
+
+    except sqlite3.Error as e:
+        json.dump({"status": "error", "message": f"Database error: {e}"}, sys.stdout, indent=2)
+        print()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,37 @@ if [[ ! -f "$STATE_FILE" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Helper: safe SQLite query via Python with parameterized path
+# Avoids SQL injection by passing db_path as sys.argv, not string interpolation.
+# ---------------------------------------------------------------------------
+safe_db_count() {
+  local db_file="$1"
+  local sql_query="$2"
+  if [[ ! -f "$db_file" ]]; then
+    echo "0"
+    return
+  fi
+  local result
+  result=$(python3 -c "
+import sqlite3, sys
+try:
+    db = sqlite3.connect(sys.argv[1])
+    print(db.execute(sys.argv[2]).fetchone()[0])
+    db.close()
+except Exception as e:
+    print('DB_ERROR:' + str(e), file=sys.stderr)
+    print('-1')
+" "$db_file" "$sql_query" 2>&1)
+
+  # Check for DB errors — return -1 so caller can distinguish from "zero results"
+  if [[ "$result" == "-1" ]] || [[ -z "$result" ]]; then
+    echo "-1"
+  else
+    echo "$result"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Parse state file frontmatter
 # ---------------------------------------------------------------------------
 FRONTMATTER=$(sed -n '/^---$/,/^---$/{ /^---$/d; p; }' "$STATE_FILE")
@@ -100,6 +131,13 @@ validate_numeric "global_iteration" "$GLOBAL_ITERATION"
 validate_numeric "max_global_iterations" "$MAX_GLOBAL_ITERATIONS"
 validate_numeric "innovation_cycles" "$INNOVATION_CYCLES"
 validate_numeric "max_innovation_cycles" "$MAX_INNOVATION_CYCLES"
+
+# Validate bounds — current_phase must be 1-7
+if [[ $CURRENT_PHASE -lt 1 ]] || [[ $CURRENT_PHASE -gt 7 ]]; then
+  echo "⚠️  Algo loop: State file corrupted — current_phase=$CURRENT_PHASE (must be 1-7)" >&2
+  rm "$STATE_FILE"
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Check global iteration limit
@@ -207,8 +245,13 @@ if [[ "$PHASE_ADVANCED" == "true" ]]; then
     QUALITY_SCORE=$(echo "$LAST_OUTPUT" | grep -oP '<!--\s*QUALITY_SCORE:([\d.]+)\s*-->' | grep -oP '[\d.]+' | tail -1 || echo "")
     QUALITY_PASSED=$(echo "$LAST_OUTPUT" | grep -oP '<!--\s*QUALITY_PASSED:(\d)\s*-->' | grep -oP '\d' | tail -1 || echo "")
 
-    if [[ -n "$QUALITY_PASSED" ]] && [[ "$QUALITY_PASSED" == "0" ]]; then
-      # Quality gate FAILED — repeat this phase
+    if [[ -z "$QUALITY_PASSED" ]]; then
+      # Quality gate REQUIRED but no score marker found — block advancement
+      # The quality-evaluator agent MUST run and emit markers before phase can advance
+      PHASE_ADVANCED=false
+      QUALITY_FAILED=true
+    elif [[ "$QUALITY_PASSED" == "0" ]]; then
+      # Quality gate explicitly FAILED — repeat this phase
       PHASE_ADVANCED=false
       QUALITY_FAILED=true
     fi
@@ -240,9 +283,9 @@ if [[ "$PHASE_ADVANCED" == "true" ]]; then
 
   # HARD BLOCK 1: Phase 1→2 — algorithms table must have entries with components NOT NULL
   if [[ $CURRENT_PHASE -eq 1 ]] && [[ "$HARD_BLOCK" != "true" ]]; then
-    if [[ -f "$DB_PATH" ]]; then
-      DECOMPOSED_COUNT=$(python3 -c "import sqlite3; db=sqlite3.connect('$DB_PATH'); print(db.execute(\"SELECT COUNT(*) FROM algorithms WHERE components IS NOT NULL\").fetchone()[0])" 2>/dev/null || echo "0")
-    else
+    DECOMPOSED_COUNT=$(safe_db_count "$DB_PATH" "SELECT COUNT(*) FROM algorithms WHERE components IS NOT NULL")
+    if [[ "$DECOMPOSED_COUNT" == "-1" ]]; then
+      echo "⚠️  Algo loop: Database error checking hard block for phase 1 (DB: $DB_PATH)" >&2
       DECOMPOSED_COUNT=0
     fi
     if [[ "$DECOMPOSED_COUNT" -eq 0 ]]; then
@@ -254,9 +297,9 @@ if [[ "$PHASE_ADVANCED" == "true" ]]; then
   # HARD BLOCK 2: Phase 2→3 — algorithms table must have entries with category='invented'
   # Skipped in standard mode (inventions not required)
   if [[ $CURRENT_PHASE -eq 2 ]] && [[ "$MODE" != "standard" ]] && [[ "$HARD_BLOCK" != "true" ]]; then
-    if [[ -f "$DB_PATH" ]]; then
-      INVENTED_COUNT=$(python3 -c "import sqlite3; db=sqlite3.connect('$DB_PATH'); print(db.execute(\"SELECT COUNT(*) FROM algorithms WHERE category='invented'\").fetchone()[0])" 2>/dev/null || echo "0")
-    else
+    INVENTED_COUNT=$(safe_db_count "$DB_PATH" "SELECT COUNT(*) FROM algorithms WHERE category='invented'")
+    if [[ "$INVENTED_COUNT" == "-1" ]]; then
+      echo "⚠️  Algo loop: Database error checking hard block for phase 2 (DB: $DB_PATH)" >&2
       INVENTED_COUNT=0
     fi
     if [[ "$INVENTED_COUNT" -eq 0 ]]; then
@@ -267,9 +310,9 @@ if [[ "$PHASE_ADVANCED" == "true" ]]; then
 
   # HARD BLOCK 3: Phase 3→4 — implementations table must have entries with status='tests_pass'
   if [[ $CURRENT_PHASE -eq 3 ]] && [[ "$HARD_BLOCK" != "true" ]]; then
-    if [[ -f "$DB_PATH" ]]; then
-      TESTS_PASS_COUNT=$(python3 -c "import sqlite3; db=sqlite3.connect('$DB_PATH'); print(db.execute(\"SELECT COUNT(*) FROM implementations WHERE status='tests_pass'\").fetchone()[0])" 2>/dev/null || echo "0")
-    else
+    TESTS_PASS_COUNT=$(safe_db_count "$DB_PATH" "SELECT COUNT(*) FROM implementations WHERE status='tests_pass'")
+    if [[ "$TESTS_PASS_COUNT" == "-1" ]]; then
+      echo "⚠️  Algo loop: Database error checking hard block for phase 3 (DB: $DB_PATH)" >&2
       TESTS_PASS_COUNT=0
     fi
     if [[ "$TESTS_PASS_COUNT" -eq 0 ]]; then
@@ -280,9 +323,9 @@ if [[ "$PHASE_ADVANCED" == "true" ]]; then
 
   # HARD BLOCK 4: Phase 4→5 — benchmark_results table must have entries
   if [[ $CURRENT_PHASE -eq 4 ]] && [[ "$HARD_BLOCK" != "true" ]]; then
-    if [[ -f "$DB_PATH" ]]; then
-      BENCHMARK_COUNT=$(python3 -c "import sqlite3; db=sqlite3.connect('$DB_PATH'); print(db.execute('SELECT COUNT(*) FROM benchmark_results').fetchone()[0])" 2>/dev/null || echo "0")
-    else
+    BENCHMARK_COUNT=$(safe_db_count "$DB_PATH" "SELECT COUNT(*) FROM benchmark_results")
+    if [[ "$BENCHMARK_COUNT" == "-1" ]]; then
+      echo "⚠️  Algo loop: Database error checking hard block for phase 4 (DB: $DB_PATH)" >&2
       BENCHMARK_COUNT=0
     fi
     if [[ "$BENCHMARK_COUNT" -eq 0 ]]; then
@@ -293,9 +336,9 @@ if [[ "$PHASE_ADVANCED" == "true" ]]; then
 
   # HARD BLOCK 5: Phase 5→6 — complexity_analysis table must have entries
   if [[ $CURRENT_PHASE -eq 5 ]] && [[ "$HARD_BLOCK" != "true" ]]; then
-    if [[ -f "$DB_PATH" ]]; then
-      COMPLEXITY_COUNT=$(python3 -c "import sqlite3; db=sqlite3.connect('$DB_PATH'); print(db.execute('SELECT COUNT(*) FROM complexity_analysis').fetchone()[0])" 2>/dev/null || echo "0")
-    else
+    COMPLEXITY_COUNT=$(safe_db_count "$DB_PATH" "SELECT COUNT(*) FROM complexity_analysis")
+    if [[ "$COMPLEXITY_COUNT" == "-1" ]]; then
+      echo "⚠️  Algo loop: Database error checking hard block for phase 5 (DB: $DB_PATH)" >&2
       COMPLEXITY_COUNT=0
     fi
     if [[ "$COMPLEXITY_COUNT" -eq 0 ]]; then
@@ -306,9 +349,9 @@ if [[ "$PHASE_ADVANCED" == "true" ]]; then
 
   # HARD BLOCK 6: Phase 6→7 — invention_log table must have entries with outcome NOT NULL
   if [[ $CURRENT_PHASE -eq 6 ]] && [[ "$HARD_BLOCK" != "true" ]]; then
-    if [[ -f "$DB_PATH" ]]; then
-      OUTCOME_COUNT=$(python3 -c "import sqlite3; db=sqlite3.connect('$DB_PATH'); print(db.execute(\"SELECT COUNT(*) FROM invention_log WHERE outcome IS NOT NULL\").fetchone()[0])" 2>/dev/null || echo "0")
-    else
+    OUTCOME_COUNT=$(safe_db_count "$DB_PATH" "SELECT COUNT(*) FROM invention_log WHERE outcome IS NOT NULL")
+    if [[ "$OUTCOME_COUNT" == "-1" ]]; then
+      echo "⚠️  Algo loop: Database error checking hard block for phase 6 (DB: $DB_PATH)" >&2
       OUTCOME_COUNT=0
     fi
     if [[ "$OUTCOME_COUNT" -eq 0 ]]; then
@@ -395,7 +438,7 @@ fi
 # ---------------------------------------------------------------------------
 # Update state file atomically
 # ---------------------------------------------------------------------------
-TEMP_FILE="${STATE_FILE}.tmp.$$"
+TEMP_FILE=$(mktemp "${STATE_FILE}.tmp.XXXXXX")
 cat > "$TEMP_FILE" <<EOF
 ---
 active: true
@@ -438,7 +481,11 @@ if [[ "$FORCED_ADVANCE" == "true" ]]; then
 fi
 
 if [[ "$QUALITY_FAILED" == "true" ]]; then
-  SYSTEM_MSG="$SYSTEM_MSG | ❌ Quality gate FAILED — repeating phase. Review evaluator feedback and improve output."
+  if [[ -n "$QUALITY_SCORE" ]]; then
+    SYSTEM_MSG="$SYSTEM_MSG | ❌ Quality gate FAILED (score: $QUALITY_SCORE) — repeating phase. Review evaluator feedback and improve output."
+  else
+    SYSTEM_MSG="$SYSTEM_MSG | ❌ Quality gate REQUIRED but no quality evaluation found — you MUST run the quality-evaluator agent and emit <!-- QUALITY_SCORE:X.XX --> <!-- QUALITY_PASSED:1 --> markers before this phase can advance."
+  fi
 fi
 
 if [[ "$HARD_BLOCK" == "true" ]]; then

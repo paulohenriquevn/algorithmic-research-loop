@@ -218,6 +218,23 @@ python3 {{PLUGIN_ROOT}}/scripts/algo_database.py add-message \
   --metadata-json '{"algorithms_analyzed": X, "theory_matches": Y, "discrepancies": Z, "best_r_squared": 0.999}'
 ```
 
+## Phase 5 Scope
+
+Phase 5 (Validate) goes beyond curve fitting. You MUST cover all four validation dimensions:
+
+1. **Correctness validation:** Verify algorithm outputs match expected results across ALL benchmark inputs. Any algorithm that produces wrong output is flagged as `status: broken` in the database, regardless of performance.
+2. **Complexity validation:** Compare theoretical Big-O against empirical curve fitting. Flag any discrepancy where the best-fit R² < 0.8 as `complexity_mismatch`. Report both the theoretical class and the empirical best-fit with R² values.
+3. **Stability validation:** Compute coefficient of variation (std_dev / mean) for each algorithm at each input size. Flag algorithms with CV > 0.15 as `unstable`. Unstable performance indicates non-deterministic behavior, GC interference, or input-sensitive pathologies.
+4. **Edge case validation:** Confirm every algorithm handles these inputs without crashing or producing incorrect output:
+   - Empty input (n=0)
+   - Single element (n=1)
+   - All-duplicate elements
+   - Already-sorted input
+   - Reverse-sorted input
+   - Maximum tested size
+
+Write edge case results to `{{OUTPUT_DIR}}/analysis/edge_case_validation.md` and register failures in the database with `message_type: edge_case_failure`.
+
 ## Rules
 
 - **Show the derivation** — don't just state Big-O; prove it step by step

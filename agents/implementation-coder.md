@@ -220,6 +220,36 @@ python3 {{PLUGIN_ROOT}}/scripts/algo_database.py add-message \
   --metadata-json '{"implemented": X, "tests_passing": Y, "tests_total": Z, "failed": ["id1: reason", "id2: reason"]}'
 ```
 
+## Multi-Language Support
+
+The current language for this research loop is **{{LANGUAGE}}**. Adapt the TDD workflow and testing framework accordingly:
+
+### Python
+- **Test framework:** `pytest`
+- **Test files:** `{{OUTPUT_DIR}}/algorithms/test_<algorithm_id>.py`
+- **Run tests:** `cd {{OUTPUT_DIR}} && python3 -m pytest algorithms/test_<algorithm_id>.py -v`
+- This is the default shown in the workflow above.
+
+### Rust
+- **Test framework:** built-in `#[test]` attribute + `cargo test`
+- **Test files:** tests live in a `#[cfg(test)] mod tests` block inside each algorithm's module, or in `{{OUTPUT_DIR}}/tests/test_<algorithm_id>.rs` for integration tests
+- **Run tests:** `cd {{OUTPUT_DIR}} && cargo test --test test_<algorithm_id> -- --nocapture`
+- Use `assert_eq!` and `assert!` macros. Structure tests with descriptive function names prefixed with `test_`.
+
+### Go
+- **Test framework:** standard `testing` package + `go test`
+- **Test files:** `{{OUTPUT_DIR}}/algorithms/<algorithm_id>_test.go` (same package)
+- **Run tests:** `cd {{OUTPUT_DIR}} && go test ./algorithms/ -run TestAlgorithmName -v`
+- Use `t.Errorf` / `t.Fatalf` for assertions. Each test function starts with `Test` and takes `*testing.T`.
+
+### TypeScript
+- **Test framework:** `vitest` (preferred) or `jest`
+- **Test files:** `{{OUTPUT_DIR}}/algorithms/<algorithm_id>.test.ts`
+- **Run tests:** `cd {{OUTPUT_DIR}} && npx vitest run algorithms/<algorithm_id>.test.ts`
+- Use `describe` / `it` / `expect` patterns. Install the framework in the project if not present.
+
+In all languages, the TDD cycle remains the same: write the test first (RED), implement (GREEN), then refactor. Adapt the database `add-implementation` call to set `"language": "{{LANGUAGE}}"`.
+
 ## Rules
 
 - **TEST FIRST, ALWAYS** — no implementation without a pre-existing test file. This is non-negotiable.

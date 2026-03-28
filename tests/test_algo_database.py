@@ -11,6 +11,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from algo_database import (
+    VALID_ALGO_STATUSES,
+    VALID_CATEGORIES,
+    VALID_IMPL_STATUSES,
+    VALID_MESSAGE_TYPES,
+    VALID_OUTCOMES,
+    VALID_STRATEGIES,
+    _parse_json_arg,
     add_agent_message,
     add_algorithm,
     add_benchmark,
@@ -22,6 +29,7 @@ from algo_database import (
     get_quality_history,
     get_stats,
     init_db,
+    main,
     query_algorithms,
     query_benchmark_results,
     query_complexity,
@@ -948,6 +956,193 @@ class TestStats(unittest.TestCase):
     def test_stats_agent_messages(self):
         stats = get_stats(self.db_path)
         self.assertEqual(stats["total_agent_messages"], 1)
+
+
+# ---------------------------------------------------------------------------
+# Validation Tests — enum, range, and JSON parsing
+# ---------------------------------------------------------------------------
+class TestEnumValidation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.tmp.name
+        init_db(self.db_path)
+
+    def test_add_algorithm_invalid_category(self):
+        algo = {**SAMPLE_ALGORITHM, "id": "test-invalid-cat", "category": "bogus"}
+        with self.assertRaises(ValueError) as ctx:
+            add_algorithm(self.db_path, algo)
+        self.assertIn("category", str(ctx.exception))
+
+    def test_add_algorithm_invalid_status(self):
+        algo = {**SAMPLE_ALGORITHM, "id": "test-invalid-status", "status": "unknown"}
+        with self.assertRaises(ValueError) as ctx:
+            add_algorithm(self.db_path, algo)
+        self.assertIn("status", str(ctx.exception))
+
+    def test_add_algorithm_invalid_origin(self):
+        algo = {**SAMPLE_ALGORITHM, "id": "test-invalid-origin", "origin": "magic"}
+        with self.assertRaises(ValueError) as ctx:
+            add_algorithm(self.db_path, algo)
+        self.assertIn("origin", str(ctx.exception))
+
+    def test_update_algorithm_invalid_status(self):
+        add_algorithm(self.db_path, SAMPLE_ALGORITHM)
+        with self.assertRaises(ValueError):
+            update_algorithm(self.db_path, "algo-mergesort", {"status": "invalid"})
+
+    def test_add_implementation_invalid_status(self):
+        add_algorithm(self.db_path, SAMPLE_ALGORITHM)
+        with self.assertRaises(ValueError):
+            add_implementation(self.db_path, "algo-mergesort", {"file_path": "x.py", "status": "bogus"})
+
+    def test_add_invention_invalid_strategy(self):
+        with self.assertRaises(ValueError):
+            add_invention(self.db_path, {
+                "cycle": 1, "strategy": "telepathy", "hypothesis": "test",
+            })
+
+    def test_add_invention_invalid_outcome(self):
+        with self.assertRaises(ValueError):
+            add_invention(self.db_path, {
+                "cycle": 1, "strategy": "mutation", "hypothesis": "test", "outcome": "maybe",
+            })
+
+    def test_add_agent_message_invalid_type(self):
+        with self.assertRaises(ValueError):
+            add_agent_message(self.db_path, "agent", 1, 1, "gossip", "hello")
+
+    def test_add_complexity_invalid_analysis_type(self):
+        add_algorithm(self.db_path, SAMPLE_ALGORITHM)
+        with self.assertRaises(ValueError):
+            add_complexity(self.db_path, {
+                "algorithm_id": "algo-mergesort",
+                "analysis_type": "guessing",
+                "metric": "time",
+                "complexity_class": "O(n)",
+            })
+
+    def test_add_complexity_invalid_metric(self):
+        add_algorithm(self.db_path, SAMPLE_ALGORITHM)
+        with self.assertRaises(ValueError):
+            add_complexity(self.db_path, {
+                "algorithm_id": "algo-mergesort",
+                "analysis_type": "theoretical",
+                "metric": "fun_level",
+                "complexity_class": "O(n)",
+            })
+
+
+class TestRangeValidation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.tmp.name
+        init_db(self.db_path)
+
+    def test_quality_score_out_of_range(self):
+        with self.assertRaises(ValueError):
+            add_quality_score(self.db_path, 1, "explore", 1, 1.5, 0.7)
+
+    def test_quality_score_negative(self):
+        with self.assertRaises(ValueError):
+            add_quality_score(self.db_path, 1, "explore", 1, -0.1, 0.7)
+
+    def test_quality_threshold_out_of_range(self):
+        with self.assertRaises(ValueError):
+            add_quality_score(self.db_path, 1, "explore", 1, 0.5, 2.0)
+
+    def test_quality_phase_out_of_range(self):
+        with self.assertRaises(ValueError):
+            add_quality_score(self.db_path, 0, "invalid", 1, 0.5, 0.7)
+
+    def test_quality_phase_too_high(self):
+        with self.assertRaises(ValueError):
+            add_quality_score(self.db_path, 8, "invalid", 1, 0.5, 0.7)
+
+    def test_complexity_r_squared_out_of_range(self):
+        add_algorithm(self.db_path, SAMPLE_ALGORITHM)
+        with self.assertRaises(ValueError):
+            add_complexity(self.db_path, {
+                "algorithm_id": "algo-mergesort",
+                "analysis_type": "empirical",
+                "metric": "time",
+                "complexity_class": "O(n log n)",
+                "r_squared": 1.5,
+            })
+
+
+class TestJsonParsing(unittest.TestCase):
+    def test_parse_json_arg_valid(self):
+        result = _parse_json_arg('{"key": "value"}', "test")
+        self.assertEqual(result, {"key": "value"})
+
+    def test_parse_json_arg_invalid(self):
+        with self.assertRaises(ValueError) as ctx:
+            _parse_json_arg("not json at all", "--test-arg")
+        self.assertIn("--test-arg", str(ctx.exception))
+
+    def test_parse_json_arg_empty(self):
+        with self.assertRaises(ValueError):
+            _parse_json_arg("", "--empty")
+
+
+class TestContextManagerSafety(unittest.TestCase):
+    """Verify connections are properly closed even on errors."""
+
+    def test_connection_closed_on_foreign_key_violation(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        db_path = tmp.name
+        init_db(db_path)
+
+        # This should raise because the algorithm doesn't exist
+        with self.assertRaises(sqlite3.IntegrityError):
+            add_implementation(db_path, "nonexistent-algo", {
+                "file_path": "x.py", "status": "draft",
+            })
+
+        # DB should still be usable after the error
+        stats = get_stats(db_path)
+        self.assertEqual(stats["total_implementations"], 0)
+
+
+class TestCLIErrorHandling(unittest.TestCase):
+    """Test CLI main() handles errors gracefully."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.tmp.name
+        init_db(self.db_path)
+
+    def test_cli_invalid_json(self):
+        import io
+        from unittest.mock import patch
+
+        test_args = ["prog", "add-algorithm", "--db-path", self.db_path,
+                      "--algo-json", "NOT VALID JSON"]
+        with patch("sys.argv", test_args), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+            self.assertEqual(ctx.exception.code, 1)
+            output = json.loads(mock_out.getvalue())
+            self.assertEqual(output["status"], "error")
+
+    def test_cli_invalid_enum(self):
+        import io
+        from unittest.mock import patch
+
+        algo_json = json.dumps({
+            "id": "test", "name": "test", "category": "invalid_cat",
+            "description": "test",
+        })
+        test_args = ["prog", "add-algorithm", "--db-path", self.db_path,
+                      "--algo-json", algo_json]
+        with patch("sys.argv", test_args), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+            self.assertEqual(ctx.exception.code, 1)
+            output = json.loads(mock_out.getvalue())
+            self.assertIn("category", output["message"])
 
 
 if __name__ == "__main__":

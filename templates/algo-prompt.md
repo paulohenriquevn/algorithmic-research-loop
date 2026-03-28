@@ -694,6 +694,22 @@ Output `<promise>{{COMPLETION_PROMISE}}</promise>`
 
 ---
 
+## Phase Data Flow — Inputs and Outputs
+
+| Phase | Produces (Outputs) | Consumes (Inputs) |
+|-------|-------------------|-------------------|
+| 1. Explore | DB: algorithms (with components), state/exploration.md | Topic, codebase (applied mode) |
+| 2. Ideate | DB: algorithms (category=invented), DB: invention_log, state/ideas.md | DB: algorithms components from Phase 1 |
+| 3. Implement | DB: implementations (status=tests_pass), algo-output/algorithms/*.py, algo-output/algorithms/tests/* | DB: algorithms from Phases 1-2 |
+| 4. Benchmark | DB: benchmark_results, benchmarks/results/*, benchmarks/suite.py | DB: implementations with tests_pass |
+| 5. Validate | DB: complexity_analysis, analysis/complexity_report.md, analysis/curve_fits/* | DB: benchmark_results, DB: algorithms |
+| 6. Analyze | analysis/forensic_report.md, analysis/gap_report.md, DB: invention_log (outcomes updated) | DB: all tables, all analysis files |
+| 7. Report | final_report.md, invention_log.md, figures/*.svg | DB: all tables, all analysis files |
+
+> **Note:** Each phase's hard block (enforced by the stop hook) requires the "Produces" artifacts to exist in the database before advancement is allowed.
+
+---
+
 ## Tools Reference
 
 ### Database

@@ -183,6 +183,33 @@ python3 {{PLUGIN_ROOT}}/scripts/algo_database.py add-quality-score \
   --details '{"phase_name":"implementation","decision":"PASS","dimensions":{...},"feedback":"...","issues":[]}'
 ```
 
+## Recovery Protocol for Failed Quality Gates
+
+When a phase FAILS quality evaluation, the following recovery protocol applies:
+
+1. **Who corrects:** The same agents that produced the phase output re-run. The quality evaluator does NOT fix the work — it only diagnoses deficiencies.
+2. **How feedback is delivered:** The quality evaluator writes a feedback message to the database:
+   ```bash
+   python3 {{PLUGIN_ROOT}}/scripts/algo_database.py add-message \
+     --db-path {{OUTPUT_DIR}}/algo.db \
+     --from-agent quality-evaluator --phase N --iteration M \
+     --message-type feedback \
+     --content "SPECIFIC_DEFICIENCIES_AND_REQUIRED_FIXES" \
+     --metadata-json '{"score": 0.XX, "failed_dimensions": [...], "issues": [...]}'
+   ```
+3. **What changes:** The repeating phase iteration receives this feedback in its system context. The re-running agents MUST address each listed deficiency explicitly. Generic "improved quality" responses are not acceptable — each issue must be resolved or justified.
+4. **Max retries:** A phase can repeat up to its configured `max_iterations`. If quality still fails after exhausting all retries, the orchestrator forces advancement with a warning marker:
+   ```
+   <!-- FORCED_ADVANCE:1 -->
+   <!-- FORCED_ADVANCE_REASON:quality_gate_exhausted_retries -->
+   ```
+5. **Output markers:** The quality evaluator MUST always emit both markers in every evaluation:
+   ```
+   <!-- QUALITY_SCORE:X.XX -->
+   <!-- QUALITY_PASSED:0|1 -->
+   ```
+   These markers are machine-parsed by the orchestrator. Missing markers cause the phase to be treated as FAILED.
+
 ## Rules
 
 - Be rigorous but fair — the threshold exists for a reason

@@ -278,6 +278,36 @@ python3 {{PLUGIN_ROOT}}/scripts/algo_database.py add-message \
   --metadata-json '{"algorithms_tested": X, "total_tests": Y, "passing": Z, "property_tests": A, "edge_tests": B, "stress_tests": C}'
 ```
 
+## Multi-Language Support
+
+The current language for this research loop is **{{LANGUAGE}}**. Property-based testing tools differ per language:
+
+### Python
+- **Library:** `hypothesis`
+- **Install:** `pip install hypothesis`
+- **Usage:** `@given(st.lists(st.integers()))` decorator on test functions
+- **Graceful skip:** wrap with `pytest.mark.skipif(not HAS_HYPOTHESIS, ...)` as shown above
+
+### Rust
+- **Library:** `proptest`
+- **Install:** add `proptest = "1"` to `[dev-dependencies]` in `Cargo.toml`
+- **Usage:** `proptest! { #[test] fn test_sorted(input in prop::collection::vec(any::<i64>(), 0..500)) { ... } }`
+- **File:** write property tests in `{{OUTPUT_DIR}}/tests/prop_<algorithm_id>.rs`
+
+### Go
+- **Library:** `testing/quick` (standard library)
+- **Install:** none required
+- **Usage:** `quick.Check(func(input []int) bool { ... }, nil)` inside regular `Test` functions
+- **File:** write property tests in `{{OUTPUT_DIR}}/algorithms/<algorithm_id>_prop_test.go`
+
+### TypeScript
+- **Library:** `fast-check`
+- **Install:** `npm install --save-dev fast-check`
+- **Usage:** `fc.assert(fc.property(fc.array(fc.integer()), (input) => { ... }))` inside `it` blocks
+- **File:** write property tests in `{{OUTPUT_DIR}}/algorithms/<algorithm_id>.property.test.ts`
+
+For all languages, property-based tests should verify the same invariants: output correctness, length preservation, permutation integrity, and idempotency. If the property-based library is unavailable, skip those tests gracefully rather than failing the suite.
+
 ## Rules
 
 - **Test BEHAVIOR, not implementation** — tests should survive refactoring

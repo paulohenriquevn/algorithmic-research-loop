@@ -17,6 +17,8 @@ Programmatic usage:
     outliers = detect_outliers(result["raw_times"])
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -24,13 +26,14 @@ import platform
 import sys
 import time
 import tracemalloc
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------
 # Benchmarking
 # ---------------------------------------------------------------------------
 
-def run_benchmark(func: callable, args: tuple = (), kwargs: dict | None = None,
+def run_benchmark(func: callable, args: tuple = (), kwargs: Optional[dict] = None,
                   warmup: int = 3, runs: int = 10) -> dict:
     """Run a function multiple times and collect timing statistics.
 
@@ -69,7 +72,9 @@ def run_benchmark(func: callable, args: tuple = (), kwargs: dict | None = None,
         raw_times_ms.append(elapsed_ms)
 
     mean = sum(raw_times_ms) / len(raw_times_ms)
-    variance = sum((t - mean) ** 2 for t in raw_times_ms) / len(raw_times_ms)
+    # Use sample variance (Bessel's correction) for unbiased estimate with small samples
+    divisor = len(raw_times_ms) - 1 if len(raw_times_ms) > 1 else 1
+    variance = sum((t - mean) ** 2 for t in raw_times_ms) / divisor
     std_dev = variance ** 0.5
     sorted_times = sorted(raw_times_ms)
     n = len(sorted_times)
@@ -111,7 +116,9 @@ def detect_outliers(times: list[float], threshold: float = 2.0) -> list[int]:
         return []
 
     mean = sum(times) / len(times)
-    variance = sum((t - mean) ** 2 for t in times) / len(times)
+    # Use sample variance (Bessel's correction) for unbiased estimate
+    divisor = len(times) - 1 if len(times) > 1 else 1
+    variance = sum((t - mean) ** 2 for t in times) / divisor
     std_dev = variance ** 0.5
 
     if std_dev == 0.0:
@@ -151,7 +158,7 @@ def get_environment() -> dict:
     }
 
 
-def _get_total_ram_mb() -> int | None:
+def _get_total_ram_mb() -> Optional[int]:
     """Read total RAM from /proc/meminfo (Linux) or fallback to None."""
     try:
         with open("/proc/meminfo", "r") as f:
@@ -193,7 +200,7 @@ def format_time(ms: float) -> str:
 # Memory profiling
 # ---------------------------------------------------------------------------
 
-def memory_usage(func: callable, args: tuple = (), kwargs: dict | None = None) -> dict:
+def memory_usage(func: callable, args: tuple = (), kwargs: Optional[dict] = None) -> dict:
     """Measure peak memory usage of a function call using tracemalloc.
 
     Args:

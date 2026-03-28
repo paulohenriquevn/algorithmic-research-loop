@@ -230,6 +230,38 @@ python3 {{PLUGIN_ROOT}}/scripts/algo_database.py add-message \
   --metadata-json '{"input_types": X, "sizes": [100,1000,10000], "metrics": ["time_ms","memory_bytes","correctness"], "warmup": W, "measured_runs": M}'
 ```
 
+## Multi-Language Support
+
+The current language for this research loop is **{{LANGUAGE}}**. Benchmarking tools and approaches differ per language:
+
+### Python
+- **Tools:** `benchmark_utils.py` (provided) + `time.perf_counter` + `tracemalloc`
+- **Suite file:** `{{OUTPUT_DIR}}/benchmarks/suite.py`
+- **Run:** `python3 benchmarks/suite.py`
+- This is the default shown above. Use `statistics` module for mean/std/median.
+
+### Rust
+- **Tools:** `criterion` crate
+- **Install:** add `criterion = { version = "0.5", features = ["html_reports"] }` to `[dev-dependencies]` and configure a `[[bench]]` target in `Cargo.toml`
+- **Suite file:** `{{OUTPUT_DIR}}/benches/benchmark_suite.rs`
+- **Run:** `cargo bench`
+- Criterion handles warmup, statistical analysis, and regression detection automatically.
+
+### Go
+- **Tools:** built-in `testing.B` benchmark support
+- **Suite file:** `{{OUTPUT_DIR}}/benchmarks/suite_test.go`
+- **Run:** `go test ./benchmarks/ -bench=. -benchmem -count=10`
+- Use `b.ResetTimer()` after setup. The `-benchmem` flag reports allocations. Use `-count=N` for multiple runs.
+
+### TypeScript
+- **Tools:** `tinybench` (recommended) or custom `perf_hooks` wrapper
+- **Install:** `npm install --save-dev tinybench`
+- **Suite file:** `{{OUTPUT_DIR}}/benchmarks/suite.ts`
+- **Run:** `npx tsx benchmarks/suite.ts`
+- For custom approach, use `performance.now()` from `perf_hooks`. Implement warmup and statistical aggregation manually.
+
+Regardless of language, the benchmark design principles remain the same: warmup runs, multiple measured iterations, statistical aggregation, correctness verification on every run, and seeded input generation for reproducibility. Adapt the DB registration call to reflect the actual suite file path and tooling.
+
 ## Rules
 
 - **Fairness is PARAMOUNT** — all algorithms must be tested under identical conditions

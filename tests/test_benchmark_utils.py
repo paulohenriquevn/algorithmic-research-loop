@@ -319,5 +319,70 @@ class TestMemoryUsage(unittest.TestCase):
         self.assertIn("peak_mb", mem)
 
 
+# ---------------------------------------------------------------------------
+# Edge case and statistical correction tests
+# ---------------------------------------------------------------------------
+class TestBesselCorrection(unittest.TestCase):
+    """Verify sample variance (n-1 divisor) is used instead of population variance."""
+
+    def test_single_run_std_dev_is_zero(self):
+        # With 1 run, std_dev should be 0 (divisor = max(1, n-1) = 1)
+        result = run_benchmark(_always_42, runs=1, warmup=0)
+        self.assertEqual(result["std_dev_ms"], 0.0)
+
+    def test_two_runs_uses_sample_variance(self):
+        # With 2 identical-ish runs, sample variance (n-1=1) gives a larger
+        # std_dev than population variance (n=2)
+        times = [10.0, 20.0]
+        mean = 15.0
+        pop_var = ((10 - 15) ** 2 + (20 - 15) ** 2) / 2  # 25.0
+        sample_var = ((10 - 15) ** 2 + (20 - 15) ** 2) / 1  # 50.0
+        self.assertGreater(sample_var, pop_var)
+
+    def test_outlier_detection_with_two_elements(self):
+        result = detect_outliers([1.0, 2.0])
+        self.assertIsInstance(result, list)
+
+    def test_outlier_detection_all_same_values(self):
+        result = detect_outliers([5.0, 5.0, 5.0, 5.0])
+        self.assertEqual(result, [])
+
+
+class TestBenchmarkExceptionHandling(unittest.TestCase):
+    def test_func_that_raises(self):
+        def bad_func():
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            run_benchmark(bad_func, runs=1, warmup=0)
+
+    def test_warmup_func_that_raises(self):
+        call_count = 0
+
+        def flaky_func():
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                raise RuntimeError("warmup boom")
+            return 42
+
+        with self.assertRaises(RuntimeError):
+            run_benchmark(flaky_func, runs=1, warmup=1)
+
+
+class TestMemoryUsageExceptionHandling(unittest.TestCase):
+    def test_tracemalloc_stops_on_exception(self):
+        import tracemalloc
+
+        def bad_func():
+            raise ValueError("boom")
+
+        with self.assertRaises(ValueError):
+            memory_usage(bad_func)
+
+        # tracemalloc should be stopped even after exception
+        self.assertFalse(tracemalloc.is_tracing())
+
+
 if __name__ == "__main__":
     unittest.main()

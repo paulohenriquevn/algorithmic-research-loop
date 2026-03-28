@@ -179,6 +179,29 @@ mkdir -p {{OUTPUT_DIR}}/state/meetings
 - **Learn from failures** — failed algorithms teach us as much as successful ones
 - **Big picture thinking** — always consider how current work feeds the overall goal
 
+## Loop-Back Decision Criteria
+
+Use these quantitative thresholds to decide whether to loop back to the Ideation phase (Phase 2) for another innovation cycle:
+
+**LOOP BACK when ALL of these are true:**
+- Gap detector reports **2 or more high-priority** unexplored directions remaining
+- Current `innovation_cycle < max_innovation_cycles` (budget not exhausted)
+- At least one of:
+  - Forensic analyst identified a **promising failure pattern** that suggests a concrete new approach (not vague "try harder")
+  - A new cross-domain analogy was discovered that has not been explored
+
+**DO NOT LOOP BACK when ANY of these are true:**
+- Quality scores are **declining across iterations** (current cycle score < previous cycle score) — this indicates diminishing returns
+- **All high-priority gaps** from gap detector have already been explored in previous cycles
+- The innovation cycle budget is exhausted (`innovation_cycle >= max_innovation_cycles`)
+- No agent has proposed a **specific, actionable** new direction (only vague suggestions remain)
+
+**Decision output:** Emit one of these markers based on the assessment:
+```
+<!-- LOOP_BACK_TO_IDEATE -->
+```
+or advance normally without the marker. Document the rationale in the meeting minutes with references to gap detector findings, quality score trends, and forensic analyst reports.
+
 ## Output Markers
 
 At the end of every meeting, output:

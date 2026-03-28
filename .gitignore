@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Research output (generated at runtime, not committed)
+algo-output/
+research-output/
+*.db
+
+# Claude Code state
+.claude/algo-loop.local.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Environment
+.env
+.venv/
+venv/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/  
+*.pyc
